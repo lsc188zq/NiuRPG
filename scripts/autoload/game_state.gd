@@ -1,0 +1,149 @@
+extends Node
+## 全局游戏状态。
+##
+## ⚠️ 这个脚本必须注册成 Autoload（项目设置 → 自动加载），
+
+## 这里的变量在**整个游戏运行期间一直存在**，换场景不会丢。
+## 场景里的数据（玩家位置、任务进度…）一旦换成节点变量，换场景就没了，
+## 所以这类"跨场景要记住的东西"都放这里。
+##
+## 设计约定：
+##   - 这里**只存数据**，不写复杂的逻辑。
+##     逻辑放各自的系统里（任务系统、背包系统…）。
+##   - 变量尽量用简单类型（bool / int / Vector2 / Array / Dictionary），
+##     因为以后要做存档的话，复杂对象很难序列化。
+
+
+# ═══════════════════════════════════════════════════
+#  玩家
+# ═══════════════════════════════════════════════════
+
+## 玩家最后所在的位置。
+## 用途：从室内场景回到室外时，让玩家出现在原来的位置，而不是回到出生点。
+var player_position: Vector2 = Vector2.ZERO
+
+## 玩家最后在哪个房间。
+## 值 = 房间场景的文件名（不含 .tscn），比如 "classroom" / "hallway"。
+##
+## 由 RoomManager 在换房间时写入。
+## 存档要用它 —— 不然读档回来不知道玩家在哪个房间。
+var current_room: String = "classroom"
+
+
+# ═══════════════════════════════════════════════════
+#  进度
+# ═══════════════════════════════════════════════════
+
+## 已完成的任务 id 列表
+var completed_quests: Array[String] = []
+
+## 通用开关。
+##
+## 用来记"某件事发生过没有"，比如：
+##   flags["已报到"] = true
+##   flags["拿到钥匙"] = true
+##
+## 为什么用字典而不是给每件事单独写一个变量： 方便随时加新的开关
+
+var flags: Dictionary = {
+	"见过小绿面":false,
+	"了解过ACM":false
+}
+
+
+# ═══════════════════════════════════════════════════
+#  信号
+# ═══════════════════════════════════════════════════
+
+## 有东西变了。set_flag / bump / spend 都会发这个信号。
+##
+## 【谁在听】QuestTracker（任务追踪器）——
+## 它一听到就回去把所有【进行中】的任务重新检查一遍。
+##
+## 为什么必须有这个信号：QuestSystem 是【被动】的，
+## 你不叫它、它就永远不动。没有这个信号，
+## 任务永远不会自己完成 —— 这是整条链子里最关键的一环。
+signal value_changed(key: String, value)
+
+
+# ═══════════════════════════════════════════════════
+#  计数器
+# ═══════════════════════════════════════════════════
+
+## 计数器。键是名字，值是数字。物品也放这里：
+##   {"钥匙": 1, "见过的人数": 3}
+##
+## 为什么物品和计数共用同一个字典：
+## "钥匙"本质上就是"名叫钥匙的计数器"，分成两套只是让成员多学一个概念。
+var counters: Dictionary = {}
+
+
+# ═══════════════════════════════════════════════════
+#  开关操作
+# ═══════════════════════════════════════════════════
+
+## 设置一个开关。
+## 在剧本里这样用：$> GameState.set_flag("已报到")
+func set_flag(key: String, value = true) -> void:
+	flags[key] = value
+	value_changed.emit(key, value)
+
+
+## 查询一个开关。
+## 在剧本里这样用：if GameState.get_flag("已报到"):
+##
+## 第二个参数是"没设过时返回什么"，默认 false。
+## 这样剧本里不用先判断开关存不存在，直接问就行。
+
+func get_flag(key: String, default = false) -> bool:
+	return flags.get(key, default)
+
+
+## 把某个开关删掉（少用，一般用于"重新开始"）
+func clear_flag(key: String) -> void:
+	flags.erase(key)
+
+
+# ═══════════════════════════════════════════════════
+#  计数器操作
+# ═══════════════════════════════════════════════════
+
+## 加数量。捡到东西、见过一个人、收集到一个零件，都调它。
+## 在剧本里这样用：$> GameState.bump("钥匙")
+func bump(key: String, n: int = 1) -> void:
+	counters[key] = counters.get(key, 0) + n
+	value_changed.emit(key, counters[key])
+
+
+## 查数量。没记过就是 0（不用先判断存不存在）。
+## 在剧本条件里这样用：[if GameState.get_count("钥匙") >= 3 /]
+func get_count(key: String) -> int:
+	return counters.get(key, 0)
+
+
+## 扣数量。数量不够就【返回 false 且什么都不做】。
+## 用来做"用钥匙开门"这类：
+##     if GameState.spend("钥匙"):
+##         开门
+##     else:
+##         还缺钥匙
+func spend(key: String, n: int = 1) -> bool:
+	if counters.get(key, 0) < n:
+		return false
+	counters[key] -= n
+	value_changed.emit(key, counters[key])
+	return true
+
+
+# ═══════════════════════════════════════════════════
+#  调试用
+# ═══════════════════════════════════════════════════
+
+## 把所有状态打印到输出面板。排查"为什么这里没触发"时很有用。
+## 用法：在剧本里写 $> GameState.debug_print()
+func debug_print() -> void:
+	print("=== GameState ===")
+	print("  玩家位置: ", player_position, "   所在房间: ", current_room)
+	print("  已完成任务: ", completed_quests)
+	print("  开关: ", flags)
+	print("  计数器: ", counters)
